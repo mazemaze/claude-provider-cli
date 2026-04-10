@@ -199,8 +199,8 @@ assert.match(result.stdout, /TEAM_RUN_OK/);
 assert.match(result.stderr, /\[team\] run started/);
 assert.match(result.stderr, /\[team\] planner: starting/);
 assert.match(result.stderr, /\[team\] worker 1\/2: starting/);
-assert.match(result.stderr, /\[team\] reviewer: completed/);
-assert.match(result.stderr, /\[team\] orchestrator: completed/);
+assert.match(result.stderr, /\[team\] reviewer: completed in /);
+assert.match(result.stderr, /\[team\] orchestrator: completed in /);
 
 const teamRunsDir = path.join(tmpHome, "team-runs");
 const teamRunDirs = fs.readdirSync(teamRunsDir);

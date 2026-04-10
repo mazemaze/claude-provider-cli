@@ -785,6 +785,7 @@ function validateTeamPassThroughArgs(args) {
 
 function runTeamRole({ role, providerName, provider, agentsJson, schema, prompt, passthroughArgs, teamRunDir, displayLabel, detail }) {
   logTeamProgress(`${displayLabel || role}: starting${detail ? ` (${detail})` : ""}`);
+  const startedAt = Date.now();
   const envEntries = Object.fromEntries(buildRuntimeEnv(providerName, provider, {
     wrappedByCcp: isCcpInvocation(),
     teamContext: {
@@ -836,17 +837,20 @@ function runTeamRole({ role, providerName, provider, agentsJson, schema, prompt,
     fail(`${role} failed with exit code ${result.status}${detail ? `: ${detail}` : ""}`);
   }
 
-  let output;
+  let parsedOutput;
   try {
-    output = JSON.parse(result.stdout.trim());
+    parsedOutput = JSON.parse(result.stdout.trim());
   } catch (error) {
     fail(`${role} returned invalid JSON`);
   }
 
-  logTeamProgress(`${displayLabel || role}: completed`);
+  const output = unwrapStructuredOutput(parsedOutput, role);
+  const elapsedMs = Date.now() - startedAt;
+  logTeamProgress(`${displayLabel || role}: completed in ${formatDuration(elapsedMs)}`);
 
   return {
-    output
+    output,
+    rawOutput: parsedOutput
   };
 }
 
@@ -859,6 +863,33 @@ function formatInline(value) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 140);
+}
+
+function unwrapStructuredOutput(parsedOutput, role) {
+  if (parsedOutput && typeof parsedOutput === "object" && parsedOutput.structured_output && typeof parsedOutput.structured_output === "object") {
+    return parsedOutput.structured_output;
+  }
+
+  if (parsedOutput && typeof parsedOutput === "object") {
+    return parsedOutput;
+  }
+
+  fail(`${role} returned an unexpected JSON shape`);
+}
+
+function formatDuration(elapsedMs) {
+  if (elapsedMs < 1000) {
+    return `${elapsedMs}ms`;
+  }
+
+  const seconds = elapsedMs / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  return `${minutes}m ${remainingSeconds}s`;
 }
 
 function cmdKey(args) {
