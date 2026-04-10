@@ -55,7 +55,10 @@ const CCP_ENV_KEYS = [
   "CCP_PROVIDER_KIND",
   "CCP_PROVIDER_NAME",
   "CCP_PROVIDER_BASE_URL",
-  "CCP_PROVIDER_MODEL"
+  "CCP_PROVIDER_MODEL",
+  "CCP_TEAM_MODE",
+  "CCP_TEAM_ROLE",
+  "CCP_TEAM_RUN_DIR"
 ];
 
 const DEFAULT_TEAM_CONFIG = {
@@ -79,6 +82,62 @@ const DEFAULT_TEAM_CONFIG = {
     prompt:
       "You are the reviewer. Validate the proposed result, call out risks or regressions, and suggest focused fixes or follow-ups."
   }
+};
+
+const PLANNER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    summary: { type: "string" },
+    subtasks: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          instructions: { type: "string" }
+        },
+        required: ["id", "title", "instructions"]
+      }
+    }
+  },
+  required: ["summary", "subtasks"]
+};
+
+const WORKER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    summary: { type: "string" },
+    result: { type: "string" }
+  },
+  required: ["summary", "result"]
+};
+
+const REVIEWER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    summary: { type: "string" },
+    issues: {
+      type: "array",
+      items: { type: "string" }
+    },
+    recommendations: { type: "string" }
+  },
+  required: ["summary", "issues", "recommendations"]
+};
+
+const ORCHESTRATOR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    summary: { type: "string" },
+    final_response: { type: "string" }
+  },
+  required: ["summary", "final_response"]
 };
 
 function main() {
@@ -165,11 +224,13 @@ Usage:
   claude-provider remove <name>
   claude-provider team show-default
   claude-provider team init [path] [--force]
+  claude-provider team run [provider] [--config <file>] --task <text> [--workers <n>] [--no-review] [-- <claude args...>]
   ccp list
   ccp status
   ccp set <provider>
   ccp <provider> [--team-agents <file>] [-- <claude args...>]
   ccp team init [path] [--force]
+  ccp team run [provider] [--config <file>] --task <text> [--workers <n>] [--no-review] [-- <claude args...>]
 
 Built-in providers:
   default  Claude Code default behavior
@@ -183,11 +244,13 @@ Examples:
   claude-provider run -- -p "review this file"
   claude-provider run glm --team-agents ./agents/team.json -- -p "review this file"
   claude-provider team init ./agents/team.json
+  claude-provider team run glm --task "review this repo" --workers 3
   eval "$(claude-provider env)"
   claude-provider add openrouter --base-url https://example.invalid/anthropic --model my-model
   ccp kimi -- -p "review this file"
   ccp glm --team-agents ./agents/team.json -- -p "review this file"
   ccp team show-default
+  ccp team run --task "implement login flow"
 `);
 }
 
@@ -368,23 +431,7 @@ function parseRunOptions(args) {
 }
 
 function readAgentsFile(filePath) {
-  const resolvedPath = path.resolve(filePath);
-  if (!fs.existsSync(resolvedPath)) {
-    fail(`team agents file not found: ${resolvedPath}`);
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(fs.readFileSync(resolvedPath, "utf8"));
-  } catch (error) {
-    fail(`team agents file must be valid JSON: ${resolvedPath}`);
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    fail(`team agents file must contain a JSON object: ${resolvedPath}`);
-  }
-
-  return JSON.stringify(parsed);
+  return JSON.stringify(readAgentsObject(filePath, "team agents file"));
 }
 
 function cmdTeam(args) {
@@ -398,8 +445,11 @@ function cmdTeam(args) {
     case "init":
       cmdTeamInit(args.slice(1));
       return;
+    case "run":
+      cmdTeamRun(args.slice(1));
+      return;
     default:
-      fail("usage: claude-provider team <show-default|init>");
+      fail("usage: claude-provider team <show-default|init|run>");
   }
 }
 
@@ -423,6 +473,364 @@ function cmdTeamInit(args) {
 
   console.log(`wrote default team config to ${resolvedPath}`);
   console.log(`use it with: ccp --team-agents ${shellQuote(resolvedPath)} -- -p "review this repo"`);
+}
+
+function cmdTeamRun(args) {
+  const config = loadConfig();
+  let providerName = config.currentProvider;
+  let teamArgs = args;
+
+  if (args[0] && !args[0].startsWith("--") && getProviderIfExists(args[0], config)) {
+    providerName = args[0];
+    teamArgs = args.slice(1);
+  }
+
+  const options = parseTeamRunOptions(teamArgs);
+  const provider = getProviderOrFail(providerName, config);
+  const teamConfig = options.configFile
+    ? readAgentsObject(options.configFile, "team config")
+    : DEFAULT_TEAM_CONFIG;
+
+  validateTeamConfig(teamConfig, {
+    needsReviewer: !options.noReview
+  });
+
+  const teamRunDir = createTeamRunDir(options.task);
+  writeJsonFile(path.join(teamRunDir, "team-config.json"), teamConfig);
+  writeJsonFile(path.join(teamRunDir, "meta.json"), {
+    mode: "team-run",
+    provider: providerName,
+    task: options.task,
+    workers: options.workers,
+    reviewEnabled: !options.noReview,
+    createdAt: new Date().toISOString(),
+    cwd: process.cwd()
+  });
+
+  const agentsJson = JSON.stringify(teamConfig);
+  const planner = runTeamRole({
+    role: "planner",
+    providerName,
+    provider,
+    agentsJson,
+    schema: PLANNER_SCHEMA,
+    prompt: buildPlannerPrompt(options.task, options.workers),
+    passthroughArgs: options.claudeArgs,
+    teamRunDir
+  });
+  writeJsonFile(path.join(teamRunDir, "planner.json"), planner.output);
+
+  const subtasks = normalizeSubtasks(planner.output.subtasks, options.task, options.workers);
+  const workerOutputs = [];
+  for (let index = 0; index < subtasks.length; index += 1) {
+    const subtask = subtasks[index];
+    const worker = runTeamRole({
+      role: "worker",
+      providerName,
+      provider,
+      agentsJson,
+      schema: WORKER_SCHEMA,
+      prompt: buildWorkerPrompt({
+        task: options.task,
+        planSummary: planner.output.summary,
+        subtask,
+        index,
+        total: subtasks.length
+      }),
+      passthroughArgs: options.claudeArgs,
+      teamRunDir
+    });
+    workerOutputs.push({
+      subtask,
+      output: worker.output
+    });
+    writeJsonFile(path.join(teamRunDir, `worker-${index + 1}.json`), {
+      subtask,
+      output: worker.output
+    });
+  }
+
+  let reviewerOutput = null;
+  if (!options.noReview) {
+    const reviewer = runTeamRole({
+      role: "reviewer",
+      providerName,
+      provider,
+      agentsJson,
+      schema: REVIEWER_SCHEMA,
+      prompt: buildReviewerPrompt({
+        task: options.task,
+        planSummary: planner.output.summary,
+        workerOutputs
+      }),
+      passthroughArgs: options.claudeArgs,
+      teamRunDir
+    });
+    reviewerOutput = reviewer.output;
+    writeJsonFile(path.join(teamRunDir, "reviewer.json"), reviewerOutput);
+  }
+
+  const orchestrator = runTeamRole({
+    role: "orchestrator",
+    providerName,
+    provider,
+    agentsJson,
+    schema: ORCHESTRATOR_SCHEMA,
+    prompt: buildOrchestratorPrompt({
+      task: options.task,
+      planSummary: planner.output.summary,
+      workerOutputs,
+      reviewerOutput
+    }),
+    passthroughArgs: options.claudeArgs,
+    teamRunDir
+  });
+  writeJsonFile(path.join(teamRunDir, "orchestrator.json"), orchestrator.output);
+
+  console.log(orchestrator.output.final_response);
+  console.error(`team run artifacts: ${teamRunDir}`);
+}
+
+function parseTeamRunOptions(args) {
+  let configFile = null;
+  let task = "";
+  let workers = 3;
+  let noReview = false;
+  const claudeArgs = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+
+    if (token === "--config") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("--")) {
+        fail("missing value for --config");
+      }
+      configFile = value;
+      index += 1;
+      continue;
+    }
+
+    if (token === "--task") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("--")) {
+        fail("missing value for --task");
+      }
+      task = value;
+      index += 1;
+      continue;
+    }
+
+    if (token === "--workers") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("--")) {
+        fail("missing value for --workers");
+      }
+      workers = Number.parseInt(value, 10);
+      index += 1;
+      continue;
+    }
+
+    if (token === "--no-review") {
+      noReview = true;
+      continue;
+    }
+
+    if (token === "--") {
+      claudeArgs.push(...args.slice(index + 1));
+      break;
+    }
+
+    fail(`unknown team run option "${token}"`);
+  }
+
+  if (!task) {
+    fail("usage: claude-provider team run [provider] [--config <file>] --task <text> [--workers <n>] [--no-review] [-- <claude args...>]");
+  }
+
+  if (!Number.isInteger(workers) || workers < 1 || workers > 12) {
+    fail("--workers must be an integer between 1 and 12");
+  }
+
+  validateTeamPassThroughArgs(claudeArgs);
+
+  return {
+    configFile,
+    task,
+    workers,
+    noReview,
+    claudeArgs
+  };
+}
+
+function validateTeamConfig(teamConfig, options = {}) {
+  const requiredRoles = ["orchestrator", "planner", "worker"];
+  if (options.needsReviewer) {
+    requiredRoles.push("reviewer");
+  }
+
+  for (const role of requiredRoles) {
+    const definition = teamConfig[role];
+    if (!definition || typeof definition !== "object") {
+      fail(`team config is missing role "${role}"`);
+    }
+    if (typeof definition.description !== "string" || typeof definition.prompt !== "string") {
+      fail(`team config role "${role}" must include string description and prompt`);
+    }
+  }
+}
+
+function normalizeSubtasks(subtasks, task, workers) {
+  if (!Array.isArray(subtasks) || subtasks.length === 0) {
+    return [{
+      id: "task-1",
+      title: "Primary task",
+      instructions: task
+    }];
+  }
+
+  return subtasks.slice(0, workers).map((subtask, index) => ({
+    id: subtask.id || `task-${index + 1}`,
+    title: subtask.title || `Task ${index + 1}`,
+    instructions: subtask.instructions || task
+  }));
+}
+
+function buildPlannerPrompt(task, workers) {
+  return [
+    "Create a practical execution plan for the following task.",
+    `Task: ${task}`,
+    `Return at most ${workers} subtasks.`,
+    "Each subtask should be independently executable by a worker.",
+    "Return JSON only."
+  ].join("\n\n");
+}
+
+function buildWorkerPrompt({ task, planSummary, subtask, index, total }) {
+  return [
+    "Complete the assigned subtask as one worker in a team hierarchy.",
+    `Original task: ${task}`,
+    `Plan summary: ${planSummary}`,
+    `Assigned subtask ${index + 1} of ${total}: ${subtask.title}`,
+    `Instructions: ${subtask.instructions}`,
+    "Return JSON only."
+  ].join("\n\n");
+}
+
+function buildReviewerPrompt({ task, planSummary, workerOutputs }) {
+  return [
+    "Review the worker outputs for correctness, gaps, and risks.",
+    `Original task: ${task}`,
+    `Plan summary: ${planSummary}`,
+    `Worker outputs:\n${formatWorkerOutputs(workerOutputs)}`,
+    "Return JSON only."
+  ].join("\n\n");
+}
+
+function buildOrchestratorPrompt({ task, planSummary, workerOutputs, reviewerOutput }) {
+  return [
+    "Synthesize the final response as the orchestrator.",
+    `Original task: ${task}`,
+    `Plan summary: ${planSummary}`,
+    `Worker outputs:\n${formatWorkerOutputs(workerOutputs)}`,
+    reviewerOutput
+      ? `Reviewer summary: ${reviewerOutput.summary}\nReviewer issues: ${(reviewerOutput.issues || []).join("; ")}\nReviewer recommendations: ${reviewerOutput.recommendations}`
+      : "No reviewer stage was used.",
+    "Produce the final response for the user.",
+    "Return JSON only."
+  ].join("\n\n");
+}
+
+function formatWorkerOutputs(workerOutputs) {
+  return workerOutputs.map((entry, index) => {
+    return [
+      `Worker ${index + 1}: ${entry.subtask.title}`,
+      `Instructions: ${entry.subtask.instructions}`,
+      `Summary: ${entry.output.summary}`,
+      `Result: ${entry.output.result}`
+    ].join("\n");
+  }).join("\n\n");
+}
+
+function validateTeamPassThroughArgs(args) {
+  const reserved = new Set([
+    "-p",
+    "--print",
+    "--output-format",
+    "--json-schema",
+    "--agent",
+    "--agents"
+  ]);
+
+  for (const arg of args) {
+    if (reserved.has(arg)) {
+      fail(`team run does not allow passing ${arg}; the wrapper manages that internally`);
+    }
+  }
+}
+
+function runTeamRole({ role, providerName, provider, agentsJson, schema, prompt, passthroughArgs, teamRunDir }) {
+  const envEntries = Object.fromEntries(buildRuntimeEnv(providerName, provider, {
+    wrappedByCcp: isCcpInvocation(),
+    teamContext: {
+      role,
+      runDir: teamRunDir
+    }
+  }).entries());
+  const childEnv = { ...process.env, ...envEntries };
+
+  for (const key of COMMON_ENV_KEYS) {
+    if (!(key in envEntries)) {
+      delete childEnv[key];
+    }
+  }
+
+  for (const key of CCP_ENV_KEYS) {
+    if (!(key in envEntries)) {
+      delete childEnv[key];
+    }
+  }
+
+  const args = [
+    ...passthroughArgs,
+    "--agents",
+    agentsJson,
+    "--agent",
+    role,
+    "--output-format",
+    "json",
+    "--json-schema",
+    JSON.stringify(schema),
+    "-p",
+    prompt
+  ];
+
+  const result = spawnSync("claude", args, {
+    env: childEnv,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 1024 * 1024 * 10
+  });
+
+  if (result.error) {
+    fail(`failed to run ${role}: ${result.error.message}`);
+  }
+
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    fail(`${role} failed with exit code ${result.status}${detail ? `: ${detail}` : ""}`);
+  }
+
+  let output;
+  try {
+    output = JSON.parse(result.stdout.trim());
+  } catch (error) {
+    fail(`${role} returned invalid JSON`);
+  }
+
+  return {
+    output
+  };
 }
 
 function cmdKey(args) {
@@ -646,6 +1054,10 @@ function getConfigPath() {
   return path.join(getConfigHome(), "config.json");
 }
 
+function getTeamRunsHome() {
+  return path.join(getConfigHome(), "team-runs");
+}
+
 function ensureConfigDir() {
   fs.mkdirSync(getConfigHome(), { recursive: true });
 }
@@ -742,7 +1154,7 @@ function buildProviderEnv(providerName, provider) {
   return env;
 }
 
-function buildWrapperEnv(providerName, provider) {
+function buildWrapperEnv(providerName, provider, options = {}) {
   const env = new Map();
   env.set("CCP_WRAPPED", "1");
   env.set("CCP_PROVIDER", providerName);
@@ -757,13 +1169,19 @@ function buildWrapperEnv(providerName, provider) {
     env.set("CCP_PROVIDER_MODEL", provider.providerModel);
   }
 
+  if (options.teamContext) {
+    env.set("CCP_TEAM_MODE", "1");
+    env.set("CCP_TEAM_ROLE", options.teamContext.role);
+    env.set("CCP_TEAM_RUN_DIR", options.teamContext.runDir);
+  }
+
   return env;
 }
 
 function buildRuntimeEnv(providerName, provider, options = {}) {
   const env = buildProviderEnv(providerName, provider);
   if (options.wrappedByCcp) {
-    for (const [key, value] of buildWrapperEnv(providerName, provider).entries()) {
+    for (const [key, value] of buildWrapperEnv(providerName, provider, options).entries()) {
       env.set(key, value);
     }
   }
@@ -851,6 +1269,46 @@ function traceCcpRun(runInfo) {
   } catch (error) {
     console.error(`claude-provider: tracing failed: ${error.message}`);
   }
+}
+
+function readAgentsObject(filePath, label) {
+  const resolvedPath = path.resolve(filePath);
+  if (!fs.existsSync(resolvedPath)) {
+    fail(`${label} not found: ${resolvedPath}`);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(resolvedPath, "utf8"));
+  } catch (error) {
+    fail(`${label} must be valid JSON: ${resolvedPath}`);
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    fail(`${label} must contain a JSON object: ${resolvedPath}`);
+  }
+
+  return parsed;
+}
+
+function createTeamRunDir(task) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const slug = sanitizeSegment(task).slice(0, 48) || "team-run";
+  const dir = path.join(getTeamRunsHome(), `${timestamp}-${slug}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function sanitizeSegment(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function writeJsonFile(filePath, data) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
 }
 
 function appendTraceEntries(entries) {

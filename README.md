@@ -86,6 +86,7 @@ If you want a starter config, the CLI can generate one for you:
 ccp team init
 ccp team init ./agents/team.json
 claude-provider team show-default
+ccp team run glm --task "review this repo"
 ```
 
 Your team file should be a JSON object, for example:
@@ -109,6 +110,19 @@ Your team file should be a JSON object, for example:
     "prompt": "You are the reviewer..."
   }
 }
+```
+
+`ccp team run` is the real multi-process mode. It launches separate Claude CLI calls for:
+
+- `planner`
+- `worker` for each planned subtask
+- `reviewer`
+- `orchestrator`
+
+Artifacts are saved under:
+
+```bash
+~/.config/claude-provider/team-runs/
 ```
 
 ## Common workflows

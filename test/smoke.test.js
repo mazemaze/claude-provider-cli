@@ -144,6 +144,66 @@ assert.equal(
 );
 assert.deepEqual(forwardedArgs.slice(2), ["-p", "hello"]);
 
+const fakeTeamClaudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-fake-team-claude-"));
+const fakeTeamClaudePath = path.join(fakeTeamClaudeDir, "claude");
+fs.writeFileSync(
+  fakeTeamClaudePath,
+  `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const roleIndex = args.indexOf("--agent");
+const role = roleIndex >= 0 ? args[roleIndex + 1] : "";
+let output;
+if (role === "planner") {
+  output = {
+    summary: "Planner summary",
+    subtasks: [
+      { id: "task-1", title: "Analyze", instructions: "Analyze the request" },
+      { id: "task-2", title: "Implement", instructions: "Implement the solution" }
+    ]
+  };
+} else if (role === "worker") {
+  output = {
+    summary: "Worker summary",
+    result: "Worker result"
+  };
+} else if (role === "reviewer") {
+  output = {
+    summary: "Reviewer summary",
+    issues: [],
+    recommendations: "Proceed"
+  };
+} else if (role === "orchestrator") {
+  output = {
+    summary: "Orchestrator summary",
+    final_response: "TEAM_RUN_OK"
+  };
+} else {
+  output = { summary: "Unknown", final_response: "UNKNOWN" };
+}
+process.stdout.write(JSON.stringify(output));
+`,
+  "utf8"
+);
+fs.chmodSync(fakeTeamClaudePath, 0o755);
+
+result = spawnSync("node", [ccpPath, "team", "run", "default", "--task", "Ship feature"], {
+  encoding: "utf8",
+  env: {
+    ...process.env,
+    CLAUDE_PROVIDER_HOME: tmpHome,
+    PATH: `${fakeTeamClaudeDir}:${process.env.PATH || ""}`
+  }
+});
+assert.equal(result.status, 0);
+assert.match(result.stdout, /TEAM_RUN_OK/);
+
+const teamRunsDir = path.join(tmpHome, "team-runs");
+const teamRunDirs = fs.readdirSync(teamRunsDir);
+assert.ok(teamRunDirs.length >= 1);
+const latestTeamRunDir = path.join(teamRunsDir, teamRunDirs[0]);
+assert.ok(fs.existsSync(path.join(latestTeamRunDir, "planner.json")));
+assert.ok(fs.existsSync(path.join(latestTeamRunDir, "orchestrator.json")));
+
 const sessionFixture = path.join(tmpHome, "fixture-session.jsonl");
 fs.writeFileSync(
   sessionFixture,
