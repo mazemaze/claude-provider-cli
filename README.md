@@ -53,6 +53,7 @@ ccp status
 ccp set kimi
 ccp run -- -p "review this file"
 ccp kimi -- -p "review this file"
+ccp --team-agents ./agents/team.json -- -p "review this file"
 ```
 
 Shortcuts:
@@ -62,6 +63,53 @@ Shortcuts:
 - `ccp set kimi` = `claude-provider use kimi`
 - `ccp kimi -- ...` = run `claude` immediately with the `kimi` provider
 - `ccp shell` = `claude-provider env`
+
+## Team Agents
+
+You can load a Claude custom agents JSON file without manually inlining JSON on the command line.
+
+Examples:
+
+```bash
+ccp glm --team-agents ./agents/team.json
+ccp --team-agents ./agents/team.json -- -p "Review this repo"
+claude-provider run glm --team-agents ./agents/team.json -- -p "Review this repo"
+ccp team init
+ccp team show-default
+```
+
+This reads the JSON file and passes it to Claude as `--agents`.
+
+If you want a starter config, the CLI can generate one for you:
+
+```bash
+ccp team init
+ccp team init ./agents/team.json
+claude-provider team show-default
+```
+
+Your team file should be a JSON object, for example:
+
+```json
+{
+  "orchestrator": {
+    "description": "Coordinates the overall workflow",
+    "prompt": "You are the orchestrator..."
+  },
+  "planner": {
+    "description": "Breaks work into steps",
+    "prompt": "You create concise execution plans."
+  },
+  "worker": {
+    "description": "Executes one concrete task",
+    "prompt": "You are a worker..."
+  },
+  "reviewer": {
+    "description": "Reviews outputs before finalizing",
+    "prompt": "You are the reviewer..."
+  }
+}
+```
 
 ## Common workflows
 
@@ -116,3 +164,59 @@ claude-provider run
 - This CLI does not overwrite your existing `claude` binary.
 - The `default` provider clears all override environment variables.
 - On non-macOS systems, Keychain operations will fail because they rely on the built-in `security` command.
+
+## Using Hooks Only With `ccp`
+
+When Claude is launched through `ccp`, it gets extra environment variables that plain `claude` and `claude-provider` do not receive:
+
+- `CCP_WRAPPED=1`
+- `CCP_PROVIDER=glm` or `kimi` or `default`
+- `CCP_PROVIDER_KIND=default` or `compatible`
+- `CCP_PROVIDER_NAME`
+- `CCP_PROVIDER_BASE_URL`
+- `CCP_PROVIDER_MODEL`
+
+That means your hook scripts can branch on `CCP_WRAPPED` and only run special logic for `ccp`.
+
+Example shell check inside a hook script:
+
+```bash
+if [ "${CCP_WRAPPED:-}" = "1" ]; then
+  echo "Running under ccp with provider: ${CCP_PROVIDER}"
+fi
+```
+
+Example for GLM-only behavior:
+
+```bash
+if [ "${CCP_PROVIDER:-}" = "glm" ]; then
+  echo "Apply GLM-specific hook behavior here"
+fi
+```
+
+## Always-On Tracing For `ccp`
+
+`ccp` now always records prompt/result traces after each Claude run by reading Claude's own session JSONL files.
+
+Trace file:
+
+```bash
+~/.config/claude-provider/traces.jsonl
+```
+
+Each JSONL record includes:
+
+- timestamp
+- cwd
+- sessionId
+- provider details
+- prompt
+- final assistant response
+- model
+- claude args
+
+Important:
+
+- Tracing is only enabled when you launch Claude through `ccp`
+- Plain `claude` runs are not traced by this wrapper
+- The trace file may contain sensitive prompts and responses

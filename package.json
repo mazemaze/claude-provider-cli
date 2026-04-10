@@ -4,7 +4,7 @@
   "description": "CLI for switching Claude Code providers with macOS Keychain-backed secrets",
   "bin": {
     "claude-provider": "./bin/claude-provider.js",
-    "ccp": "./bin/claude-provider.js"
+    "ccp": "./bin/ccp.js"
   },
   "type": "commonjs",
   "scripts": {

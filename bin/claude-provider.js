@@ -49,6 +49,38 @@ const COMMON_ENV_KEYS = [
   "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION"
 ];
 
+const CCP_ENV_KEYS = [
+  "CCP_WRAPPED",
+  "CCP_PROVIDER",
+  "CCP_PROVIDER_KIND",
+  "CCP_PROVIDER_NAME",
+  "CCP_PROVIDER_BASE_URL",
+  "CCP_PROVIDER_MODEL"
+];
+
+const DEFAULT_TEAM_CONFIG = {
+  orchestrator: {
+    description: "Coordinates the overall workflow, decides delegation, and synthesizes the final result.",
+    prompt:
+      "You are the orchestrator. Break the task into clear subtasks, decide what should be delegated, collect worker outputs, resolve conflicts, and produce the final answer."
+  },
+  planner: {
+    description: "Turns a user request into a practical execution plan with bounded tasks.",
+    prompt:
+      "You are the planner. Create a concise execution plan, identify dependencies, and propose work packets that can be done independently."
+  },
+  worker: {
+    description: "Executes one concrete task from the plan and reports its result clearly.",
+    prompt:
+      "You are a worker. Complete the assigned subtask only, keep scope tight, and return concrete results, findings, or code changes without redesigning the whole plan."
+  },
+  reviewer: {
+    description: "Checks outputs for bugs, regressions, and gaps before finalizing.",
+    prompt:
+      "You are the reviewer. Validate the proposed result, call out risks or regressions, and suggest focused fixes or follow-ups."
+  }
+};
+
 function main() {
   const args = process.argv.slice(2);
   const command = args[0] || "help";
@@ -56,6 +88,11 @@ function main() {
   const provider = getProviderIfExists(command, config);
 
   try {
+    if (isCcpInvocation() && isImplicitRunOption(command)) {
+      cmdRun(args, config);
+      return;
+    }
+
     if (provider) {
       cmdRun([command, ...args.slice(1)], config);
       return;
@@ -96,6 +133,9 @@ function main() {
       case "remove":
         cmdRemove(args.slice(1));
         return;
+      case "team":
+        cmdTeam(args.slice(1));
+        return;
       default:
         fail(`unknown command "${command}"`);
     }
@@ -117,16 +157,19 @@ Usage:
   claude-provider current
   claude-provider use <provider>
   claude-provider env [provider]
-  claude-provider run [provider] [-- <claude args...>]
+  claude-provider run [provider] [--team-agents <file>] [-- <claude args...>]
   claude-provider key set <provider> [--value <secret>]
   claude-provider key delete <provider>
   claude-provider key test <provider>
   claude-provider add <name> --base-url <url> --model <model> [--display-name <name>] [--description <text>]
   claude-provider remove <name>
+  claude-provider team show-default
+  claude-provider team init [path] [--force]
   ccp list
   ccp status
   ccp set <provider>
-  ccp <provider> [-- <claude args...>]
+  ccp <provider> [--team-agents <file>] [-- <claude args...>]
+  ccp team init [path] [--force]
 
 Built-in providers:
   default  Claude Code default behavior
@@ -138,9 +181,13 @@ Examples:
   claude-provider key set kimi
   claude-provider use kimi
   claude-provider run -- -p "review this file"
+  claude-provider run glm --team-agents ./agents/team.json -- -p "review this file"
+  claude-provider team init ./agents/team.json
   eval "$(claude-provider env)"
   claude-provider add openrouter --base-url https://example.invalid/anthropic --model my-model
   ccp kimi -- -p "review this file"
+  ccp glm --team-agents ./agents/team.json -- -p "review this file"
+  ccp team show-default
 `);
 }
 
@@ -196,9 +243,17 @@ function cmdEnv(args) {
   const config = loadConfig();
   const providerName = args[0] || config.currentProvider;
   const provider = getProviderOrFail(providerName, config);
-  const envMap = buildProviderEnv(providerName, provider);
+  const envMap = buildRuntimeEnv(providerName, provider, {
+    wrappedByCcp: isCcpInvocation()
+  });
 
   for (const key of COMMON_ENV_KEYS) {
+    if (!envMap.has(key)) {
+      console.log(`unset ${key}`);
+    }
+  }
+
+  for (const key of CCP_ENV_KEYS) {
     if (!envMap.has(key)) {
       console.log(`unset ${key}`);
     }
@@ -210,8 +265,10 @@ function cmdEnv(args) {
 }
 
 function cmdRun(args, existingConfig) {
+  const startedAt = new Date();
   let providerName = null;
   let claudeArgs = [];
+  let wrapperArgs = [];
 
   if (args.length === 0) {
     providerName = (existingConfig || loadConfig()).currentProvider;
@@ -220,15 +277,37 @@ function cmdRun(args, existingConfig) {
     claudeArgs = args.slice(1);
   } else {
     providerName = args[0];
-    claudeArgs = args[1] === "--" ? args.slice(2) : args.slice(1);
+    wrapperArgs = args[1] === "--" ? [] : args.slice(1);
+    claudeArgs = args[1] === "--" ? args.slice(2) : [];
   }
+
+  if (providerName && providerName.startsWith("--")) {
+    wrapperArgs = args[0] === "--" ? [] : args;
+    providerName = (existingConfig || loadConfig()).currentProvider;
+  }
+
+  const parsedRunOptions = parseRunOptions(wrapperArgs);
+  claudeArgs = [...parsedRunOptions.claudeArgs, ...claudeArgs];
 
   const config = existingConfig || loadConfig();
   const provider = getProviderOrFail(providerName, config);
-  const envEntries = Object.fromEntries(buildProviderEnv(providerName, provider).entries());
+  const ccpInvocation = isCcpInvocation();
+  if (parsedRunOptions.teamAgentsFile) {
+    const agentsJson = readAgentsFile(parsedRunOptions.teamAgentsFile);
+    claudeArgs = ["--agents", agentsJson, ...claudeArgs];
+  }
+  const envEntries = Object.fromEntries(buildRuntimeEnv(providerName, provider, {
+    wrappedByCcp: ccpInvocation
+  }).entries());
   const childEnv = { ...process.env, ...envEntries };
 
   for (const key of COMMON_ENV_KEYS) {
+    if (!(key in envEntries)) {
+      delete childEnv[key];
+    }
+  }
+
+  for (const key of CCP_ENV_KEYS) {
     if (!(key in envEntries)) {
       delete childEnv[key];
     }
@@ -239,11 +318,111 @@ function cmdRun(args, existingConfig) {
     env: childEnv
   });
 
+  if (ccpInvocation) {
+    traceCcpRun({
+      providerName,
+      provider,
+      claudeArgs,
+      startedAt,
+      endedAt: new Date(),
+      exitCode: result.status === null ? 1 : result.status,
+      cwd: process.cwd()
+    });
+  }
+
   if (result.error) {
     fail(`failed to run claude: ${result.error.message}`);
   }
 
   process.exit(result.status === null ? 1 : result.status);
+}
+
+function parseRunOptions(args) {
+  const claudeArgs = [];
+  let teamAgentsFile = null;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === "--team-agents" || token === "--agents-file") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("--")) {
+        fail(`missing value for ${token}`);
+      }
+      teamAgentsFile = value;
+      index += 1;
+      continue;
+    }
+
+    if (token === "--") {
+      claudeArgs.push(...args.slice(index + 1));
+      break;
+    }
+
+    claudeArgs.push(token);
+  }
+
+  return {
+    teamAgentsFile,
+    claudeArgs
+  };
+}
+
+function readAgentsFile(filePath) {
+  const resolvedPath = path.resolve(filePath);
+  if (!fs.existsSync(resolvedPath)) {
+    fail(`team agents file not found: ${resolvedPath}`);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(resolvedPath, "utf8"));
+  } catch (error) {
+    fail(`team agents file must be valid JSON: ${resolvedPath}`);
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    fail(`team agents file must contain a JSON object: ${resolvedPath}`);
+  }
+
+  return JSON.stringify(parsed);
+}
+
+function cmdTeam(args) {
+  const action = args[0];
+
+  switch (action) {
+    case "show-default":
+    case "default":
+      cmdTeamShowDefault();
+      return;
+    case "init":
+      cmdTeamInit(args.slice(1));
+      return;
+    default:
+      fail("usage: claude-provider team <show-default|init>");
+  }
+}
+
+function cmdTeamShowDefault() {
+  console.log(`${JSON.stringify(DEFAULT_TEAM_CONFIG, null, 2)}\n`);
+}
+
+function cmdTeamInit(args) {
+  const outputPath = args[0] && !args[0].startsWith("--")
+    ? args[0]
+    : path.join(process.cwd(), "agents", "team.json");
+  const force = args.includes("--force");
+  const resolvedPath = path.resolve(outputPath);
+
+  if (fs.existsSync(resolvedPath) && !force) {
+    fail(`team config already exists: ${resolvedPath}. Use --force to overwrite.`);
+  }
+
+  fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+  fs.writeFileSync(resolvedPath, `${JSON.stringify(DEFAULT_TEAM_CONFIG, null, 2)}\n`, "utf8");
+
+  console.log(`wrote default team config to ${resolvedPath}`);
+  console.log(`use it with: ccp --team-agents ${shellQuote(resolvedPath)} -- -p "review this repo"`);
 }
 
 function cmdKey(args) {
@@ -538,7 +717,6 @@ function getProviderIfExists(name, config) {
 
 function buildProviderEnv(providerName, provider) {
   const env = new Map();
-
   if (provider.kind === "default") {
     return env;
   }
@@ -562,6 +740,331 @@ function buildProviderEnv(providerName, provider) {
   env.set("ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION", provider.description);
   env.set("ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION", provider.description);
   return env;
+}
+
+function buildWrapperEnv(providerName, provider) {
+  const env = new Map();
+  env.set("CCP_WRAPPED", "1");
+  env.set("CCP_PROVIDER", providerName);
+  env.set("CCP_PROVIDER_KIND", provider.kind);
+  env.set("CCP_PROVIDER_NAME", provider.displayName);
+
+  if (provider.baseUrl) {
+    env.set("CCP_PROVIDER_BASE_URL", provider.baseUrl);
+  }
+
+  if (provider.providerModel) {
+    env.set("CCP_PROVIDER_MODEL", provider.providerModel);
+  }
+
+  return env;
+}
+
+function buildRuntimeEnv(providerName, provider, options = {}) {
+  const env = buildProviderEnv(providerName, provider);
+  if (options.wrappedByCcp) {
+    for (const [key, value] of buildWrapperEnv(providerName, provider).entries()) {
+      env.set(key, value);
+    }
+  }
+  return env;
+}
+
+function isCcpInvocation() {
+  return process.env.CCP_SHORT_ALIAS === "1";
+}
+
+function isImplicitRunOption(command) {
+  return command === "--" || command === "--team-agents" || command === "--agents-file";
+}
+
+function getClaudeHome() {
+  return process.env.CLAUDE_HOME || path.join(os.homedir(), ".claude");
+}
+
+function getTraceFilePath() {
+  return path.join(getConfigHome(), "traces.jsonl");
+}
+
+function traceCcpRun(runInfo) {
+  try {
+    const sessionIds = findRecentSessionIds({
+      claudeHome: getClaudeHome(),
+      cwd: runInfo.cwd,
+      startedAt: runInfo.startedAt
+    });
+
+    if (sessionIds.length === 0) {
+      return;
+    }
+
+    const sessionFiles = findSessionFilesForIds({
+      claudeHome: getClaudeHome(),
+      sessionIds
+    });
+
+    const traceEntries = [];
+    for (const sessionId of sessionIds) {
+      const sessionFile = sessionFiles.get(sessionId);
+      if (!sessionFile) {
+        continue;
+      }
+
+      const turns = extractTraceTurnsFromSessionFile(sessionFile, {
+        cwd: runInfo.cwd,
+        sessionId,
+        startedAt: runInfo.startedAt
+      });
+
+      for (const turn of turns) {
+        traceEntries.push({
+          traceVersion: 1,
+          wrapper: "ccp",
+          timestamp: turn.assistantTimestamp || turn.userTimestamp,
+          sessionId,
+          cwd: runInfo.cwd,
+          provider: {
+            id: runInfo.providerName,
+            kind: runInfo.provider.kind,
+            name: runInfo.provider.displayName,
+            baseUrl: runInfo.provider.baseUrl || null,
+            model: runInfo.provider.providerModel || null
+          },
+          claudeArgs: runInfo.claudeArgs,
+          run: {
+            startedAt: runInfo.startedAt.toISOString(),
+            endedAt: runInfo.endedAt.toISOString(),
+            exitCode: runInfo.exitCode
+          },
+          prompt: turn.prompt,
+          response: turn.response,
+          model: turn.model || null,
+          promptId: turn.promptId || null,
+          sessionFile
+        });
+      }
+    }
+
+    if (traceEntries.length > 0) {
+      appendTraceEntries(traceEntries);
+    }
+  } catch (error) {
+    console.error(`claude-provider: tracing failed: ${error.message}`);
+  }
+}
+
+function appendTraceEntries(entries) {
+  ensureConfigDir();
+  const lines = entries.map((entry) => JSON.stringify(entry)).join("\n");
+  fs.appendFileSync(getTraceFilePath(), `${lines}\n`, "utf8");
+}
+
+function findRecentSessionIds({ claudeHome, cwd, startedAt }) {
+  const historyPath = path.join(claudeHome, "history.jsonl");
+  if (!fs.existsSync(historyPath)) {
+    return [];
+  }
+
+  const startedAtMs = startedAt.getTime() - 1000;
+  const sessionIds = [];
+  const seen = new Set();
+  const lines = fs.readFileSync(historyPath, "utf8").split("\n");
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (entry.project !== cwd) {
+      continue;
+    }
+
+    if (typeof entry.timestamp !== "number" || entry.timestamp < startedAtMs) {
+      continue;
+    }
+
+    if (typeof entry.sessionId !== "string" || seen.has(entry.sessionId)) {
+      continue;
+    }
+
+    seen.add(entry.sessionId);
+    sessionIds.push(entry.sessionId);
+  }
+
+  return sessionIds;
+}
+
+function findSessionFilesForIds({ claudeHome, sessionIds }) {
+  const targetIds = new Set(sessionIds);
+  const results = new Map();
+  const projectsDir = path.join(claudeHome, "projects");
+  if (!fs.existsSync(projectsDir)) {
+    return results;
+  }
+
+  const walk = (currentDir) => {
+    if (results.size === targetIds.size) {
+      return;
+    }
+
+    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "subagents") {
+          continue;
+        }
+        walk(fullPath);
+        continue;
+      }
+
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) {
+        continue;
+      }
+
+      const sessionId = entry.name.replace(/\.jsonl$/, "");
+      if (targetIds.has(sessionId) && !results.has(sessionId)) {
+        results.set(sessionId, fullPath);
+      }
+    }
+  };
+
+  walk(projectsDir);
+  return results;
+}
+
+function extractTraceTurnsFromSessionFile(sessionFile, options) {
+  const lines = fs.readFileSync(sessionFile, "utf8").split("\n");
+  const startedAtMs = options.startedAt.getTime() - 1000;
+  const turns = [];
+  let currentTurn = null;
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (entry.isSidechain || entry.sessionId !== options.sessionId || entry.cwd !== options.cwd) {
+      continue;
+    }
+
+    const timestampMs = parseTimestampMs(entry.timestamp);
+    if (entry.type === "user") {
+      const prompt = extractUserPrompt(entry);
+      if (!prompt || timestampMs === null || timestampMs < startedAtMs) {
+        continue;
+      }
+
+      if (currentTurn) {
+        turns.push(currentTurn);
+      }
+
+      currentTurn = {
+        prompt,
+        response: null,
+        model: null,
+        promptId: entry.promptId || null,
+        userTimestamp: entry.timestamp,
+        assistantTimestamp: null
+      };
+      continue;
+    }
+
+    if (entry.type === "assistant" && currentTurn) {
+      const text = extractAssistantText(entry);
+      if (!text) {
+        continue;
+      }
+
+      currentTurn.response = text;
+      currentTurn.model = entry.message && entry.message.model ? entry.message.model : currentTurn.model;
+      currentTurn.assistantTimestamp = entry.timestamp || currentTurn.assistantTimestamp;
+    }
+  }
+
+  if (currentTurn) {
+    turns.push(currentTurn);
+  }
+
+  return turns.filter((turn) => turn.prompt);
+}
+
+function parseTimestampMs(timestamp) {
+  if (!timestamp) {
+    return null;
+  }
+
+  const parsed = Date.parse(timestamp);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function extractUserPrompt(entry) {
+  if (!entry.message || entry.message.role !== "user") {
+    return "";
+  }
+
+  return normalizeContentToText(entry.message.content, {
+    includeToolResults: false
+  });
+}
+
+function extractAssistantText(entry) {
+  if (!entry.message || !entry.message.content) {
+    return "";
+  }
+
+  return normalizeContentToText(entry.message.content, {
+    includeToolResults: false,
+    assistantOnly: true
+  });
+}
+
+function normalizeContentToText(content, options = {}) {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  const parts = [];
+  for (const item of content) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+
+    if (item.type === "text" && typeof item.text === "string") {
+      const text = item.text.trim();
+      if (text && text !== "[Request interrupted by user for tool use]") {
+        parts.push(text);
+      }
+      continue;
+    }
+
+    if (!options.assistantOnly && options.includeToolResults && item.type === "tool_result" && typeof item.content === "string") {
+      const text = item.content.trim();
+      if (text) {
+        parts.push(text);
+      }
+    }
+  }
+
+  return parts.join("\n\n").trim();
 }
 
 function getKeychainService(providerName) {
@@ -638,4 +1141,14 @@ function fail(message) {
   throw new Error(message);
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  main,
+  extractTraceTurnsFromSessionFile,
+  findRecentSessionIds,
+  normalizeContentToText,
+  getTraceFilePath
+};
