@@ -506,6 +506,9 @@ function cmdTeamRun(args) {
     createdAt: new Date().toISOString(),
     cwd: process.cwd()
   });
+  logTeamProgress(`run started: provider=${providerName}, workers=${options.workers}, review=${options.noReview ? "off" : "on"}`);
+  logTeamProgress(`task: ${options.task}`);
+  logTeamProgress(`artifacts: ${teamRunDir}`);
 
   const agentsJson = JSON.stringify(teamConfig);
   const planner = runTeamRole({
@@ -516,11 +519,14 @@ function cmdTeamRun(args) {
     schema: PLANNER_SCHEMA,
     prompt: buildPlannerPrompt(options.task, options.workers),
     passthroughArgs: options.claudeArgs,
-    teamRunDir
+    teamRunDir,
+    displayLabel: "planner"
   });
   writeJsonFile(path.join(teamRunDir, "planner.json"), planner.output);
+  logTeamProgress(`planner summary: ${formatInline(planner.output.summary)}`);
 
   const subtasks = normalizeSubtasks(planner.output.subtasks, options.task, options.workers);
+  logTeamProgress(`planned ${subtasks.length} worker task${subtasks.length === 1 ? "" : "s"}`);
   const workerOutputs = [];
   for (let index = 0; index < subtasks.length; index += 1) {
     const subtask = subtasks[index];
@@ -538,7 +544,9 @@ function cmdTeamRun(args) {
         total: subtasks.length
       }),
       passthroughArgs: options.claudeArgs,
-      teamRunDir
+      teamRunDir,
+      displayLabel: `worker ${index + 1}/${subtasks.length}`,
+      detail: subtask.title
     });
     workerOutputs.push({
       subtask,
@@ -548,6 +556,7 @@ function cmdTeamRun(args) {
       subtask,
       output: worker.output
     });
+    logTeamProgress(`worker ${index + 1}/${subtasks.length} summary: ${formatInline(worker.output.summary)}`);
   }
 
   let reviewerOutput = null;
@@ -564,10 +573,12 @@ function cmdTeamRun(args) {
         workerOutputs
       }),
       passthroughArgs: options.claudeArgs,
-      teamRunDir
+      teamRunDir,
+      displayLabel: "reviewer"
     });
     reviewerOutput = reviewer.output;
     writeJsonFile(path.join(teamRunDir, "reviewer.json"), reviewerOutput);
+    logTeamProgress(`reviewer summary: ${formatInline(reviewerOutput.summary)}`);
   }
 
   const orchestrator = runTeamRole({
@@ -583,9 +594,12 @@ function cmdTeamRun(args) {
       reviewerOutput
     }),
     passthroughArgs: options.claudeArgs,
-    teamRunDir
+    teamRunDir,
+    displayLabel: "orchestrator"
   });
   writeJsonFile(path.join(teamRunDir, "orchestrator.json"), orchestrator.output);
+  logTeamProgress(`orchestrator summary: ${formatInline(orchestrator.output.summary)}`);
+  logTeamProgress("run completed");
 
   console.log(orchestrator.output.final_response);
   console.error(`team run artifacts: ${teamRunDir}`);
@@ -769,7 +783,8 @@ function validateTeamPassThroughArgs(args) {
   }
 }
 
-function runTeamRole({ role, providerName, provider, agentsJson, schema, prompt, passthroughArgs, teamRunDir }) {
+function runTeamRole({ role, providerName, provider, agentsJson, schema, prompt, passthroughArgs, teamRunDir, displayLabel, detail }) {
+  logTeamProgress(`${displayLabel || role}: starting${detail ? ` (${detail})` : ""}`);
   const envEntries = Object.fromEntries(buildRuntimeEnv(providerName, provider, {
     wrappedByCcp: isCcpInvocation(),
     teamContext: {
@@ -828,9 +843,22 @@ function runTeamRole({ role, providerName, provider, agentsJson, schema, prompt,
     fail(`${role} returned invalid JSON`);
   }
 
+  logTeamProgress(`${displayLabel || role}: completed`);
+
   return {
     output
   };
+}
+
+function logTeamProgress(message) {
+  process.stderr.write(`[team] ${message}\n`);
+}
+
+function formatInline(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 140);
 }
 
 function cmdKey(args) {
