@@ -13,10 +13,10 @@ const BUILTIN_PROVIDERS = {
   },
   kimi: {
     kind: "compatible",
-    displayName: "Kimi K2.5",
+    displayName: "Kimi K2.6",
     description: "Moonshot AI via Anthropic-compatible endpoint.",
     baseUrl: "https://api.moonshot.ai/anthropic",
-    providerModel: "kimi-k2.5",
+    providerModel: "kimi-k2.6",
     anthropicModel: "sonnet",
     smallFastModel: "haiku"
   },
@@ -234,7 +234,7 @@ Usage:
 
 Built-in providers:
   default  Claude Code default behavior
-  kimi     Moonshot AI compatible endpoint using kimi-k2.5
+  kimi     Moonshot AI compatible endpoint using kimi-k2.6
   glm      Zhipu AI compatible endpoint using glm-5.1
 
 Examples:

@@ -13,7 +13,7 @@ Small macOS-focused CLI for switching Claude Code between Anthropic-compatible p
 ## Built-in providers
 
 - `default`: normal Claude Code behavior
-- `kimi`: Moonshot AI endpoint with `kimi-k2.5`
+- `kimi`: Moonshot AI endpoint with `kimi-k2.6`
 - `glm`: Zhipu AI endpoint with `glm-5.1`
 
 ## Quick start
