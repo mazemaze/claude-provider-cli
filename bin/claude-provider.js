@@ -234,7 +234,7 @@ Usage:
 
 Built-in providers:
   default  Claude Code default behavior
-  kimi     Moonshot Kimi Coding Plan (api.kimi.com/coding)
+  kimi     Moonshot Kimi Coding Plan (api.kimi.com/coding, model kimi-k2.7-code)
   glm      Zhipu AI compatible endpoint using glm-5.2[1m]
 
 Examples:
