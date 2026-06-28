@@ -13,19 +13,19 @@ const BUILTIN_PROVIDERS = {
   },
   kimi: {
     kind: "compatible",
-    displayName: "Kimi for Coding",
+    displayName: "Kimi K2.7 Code",
     description: "Moonshot Kimi Coding Plan via Anthropic-compatible endpoint.",
     baseUrl: "https://api.kimi.com/coding",
-    providerModel: "kimi-for-coding",
+    providerModel: "kimi-k2.7-code",
     anthropicModel: "sonnet",
     smallFastModel: "haiku"
   },
   glm: {
     kind: "compatible",
-    displayName: "GLM 5.1",
+    displayName: "GLM 5.2",
     description: "Zhipu AI via Anthropic-compatible endpoint.",
     baseUrl: "https://open.bigmodel.cn/api/anthropic",
-    providerModel: "glm-5.1",
+    providerModel: "glm-5.2[1m]",
     anthropicModel: "sonnet",
     smallFastModel: "haiku"
   }
@@ -235,7 +235,7 @@ Usage:
 Built-in providers:
   default  Claude Code default behavior
   kimi     Moonshot Kimi Coding Plan (api.kimi.com/coding)
-  glm      Zhipu AI compatible endpoint using glm-5.1
+  glm      Zhipu AI compatible endpoint using glm-5.2[1m]
 
 Examples:
   claude-provider list
