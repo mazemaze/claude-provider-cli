@@ -13,12 +13,13 @@ const BUILTIN_PROVIDERS = {
   },
   kimi: {
     kind: "compatible",
-    displayName: "Kimi for Coding",
+    displayName: "Kimi K3",
     description: "Moonshot Kimi Coding Plan via Anthropic-compatible endpoint.",
     baseUrl: "https://api.kimi.com/coding",
-    providerModel: "kimi-for-coding",
+    providerModel: "k3",
     anthropicModel: "sonnet",
-    smallFastModel: "haiku"
+    smallFastModel: "haiku",
+    contextWindow: 1048576
   },
   glm: {
     kind: "compatible",
@@ -34,6 +35,10 @@ const BUILTIN_PROVIDERS = {
 const KEYCHAIN_SERVICE_PREFIX = "claude-provider";
 const CURRENT_CONFIG_VERSION = 1;
 const COMMON_ENV_KEYS = [
+  // Not an ANTHROPIC_* routing var, but it belongs here: a provider that declares
+  // a contextWindow sets it, so it must be cleared when switching to one that does
+  // not. Removing it from this list leaks one provider's window into another.
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
   "ANTHROPIC_BASE_URL",
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_MODEL",
@@ -234,7 +239,7 @@ Usage:
 
 Built-in providers:
   default  Claude Code default behavior
-  kimi     Moonshot Kimi Coding Plan (api.kimi.com/coding)
+  kimi     Moonshot Kimi Coding Plan using k3 (api.kimi.com/coding)
   glm      Zhipu AI compatible endpoint using glm-5.1
 
 Examples:
@@ -1210,6 +1215,13 @@ function buildProviderEnv(providerName, provider) {
   env.set("ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION", provider.description);
   env.set("ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION", provider.description);
   env.set("ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION", provider.description);
+
+  // Claude Code only knows the context window of models in its own catalog; for
+  // provider models it assumes 200k and auto-compacts there. Declare the real one.
+  if (provider.contextWindow) {
+    env.set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", String(provider.contextWindow));
+  }
+
   return env;
 }
 

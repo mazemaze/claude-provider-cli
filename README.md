@@ -13,7 +13,7 @@ Small macOS-focused CLI for switching Claude Code between Anthropic-compatible p
 ## Built-in providers
 
 - `default`: normal Claude Code behavior
-- `kimi`: Moonshot Kimi Coding Plan (`api.kimi.com/coding`, model routed to `kimi-for-coding`)
+- `kimi`: Moonshot Kimi Coding Plan (`api.kimi.com/coding`) with `k3`, declaring its 1M-token context window so Claude Code does not assume 200k
 - `glm`: Zhipu AI endpoint with `glm-5.1`
 
 ## Quick start
@@ -176,7 +176,9 @@ claude-provider run
 ## Notes
 
 - This CLI does not overwrite your existing `claude` binary.
-- The `default` provider clears all override environment variables.
+- The `default` provider clears all override environment variables, including
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` — so if you set that yourself for unrelated
+  reasons, `ccp`/`claude-provider` will unset it.
 - On non-macOS systems, Keychain operations will fail because they rely on the built-in `security` command.
 
 ## Using Hooks Only With `ccp`

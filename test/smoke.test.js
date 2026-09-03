@@ -28,6 +28,8 @@ assert.equal(result.status, 0);
 assert.match(result.stdout, /default/);
 assert.match(result.stdout, /kimi/);
 assert.match(result.stdout, /glm/);
+assert.match(result.stdout, /name: Kimi K3/);
+assert.match(result.stdout, /model: k3/);
 
 result = run(["team", "show-default"]);
 assert.equal(result.status, 0);
@@ -78,6 +80,7 @@ assert.equal(result.status, 0);
 result = run(["env", "default"]);
 assert.equal(result.status, 0);
 assert.match(result.stdout, /unset ANTHROPIC_BASE_URL/);
+assert.match(result.stdout, /unset CLAUDE_CODE_MAX_CONTEXT_TOKENS/);
 assert.match(result.stdout, /unset CCP_WRAPPED/);
 assert.doesNotMatch(result.stdout, /export CCP_WRAPPED='1'/);
 
